@@ -104,13 +104,13 @@ type Kind string
 const (
 	KindConsole Kind = "console"
 	KindJSON    Kind = "json"
-	KindVim     Kind = "vim"
+	KindVimGrep Kind = "vimgrep"
 )
 
 var OutputKinds = map[string]Kind{
 	"console": KindConsole,
 	"json":    KindJSON,
-	"vim":     KindVim,
+	"vim":     KindVimGrep,
 }
 
 type Options struct {
@@ -130,7 +130,7 @@ func New(kind Kind, opts Options) Printer {
 	switch kind {
 	case KindJSON:
 		return JSONPrinter{Indent: opts.Indent}
-	case KindVim:
+	case KindVimGrep:
 		return VimPrinter{}
 	case KindConsole:
 		fallthrough
