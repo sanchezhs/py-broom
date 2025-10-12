@@ -1,0 +1,21 @@
+// Package colors provide colored stdout output
+package colors
+
+const (
+	ColorReset  = "\033[0m"
+	ColorRed    = "\033[31m"
+	ColorGreen  = "\033[32m"
+	ColorYellow = "\033[33m"
+	ColorBlue   = "\033[34m"
+	ColorPurple = "\033[35m"
+	ColorCyan   = "\033[36m"
+	ColorWhite  = "\033[37m"
+	ColorBold   = "\033[1m"
+)
+
+func Colorize(text string, color string, noColor bool) string {
+	if noColor {
+		return text
+	}
+	return color + text + ColorReset
+}
