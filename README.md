@@ -19,30 +19,26 @@ Two of them are Vulture or MyPy, which are great, but:
 Let's search on `directory-to-search ` unused methods (`-max-usages 1`):
 
 ```bash
-pybr directory-to-search -max-usages 1 -format json | jq
-
+py-broom main ❯ ./pybr --dir /home/samuel/Documentos/med-seg-tfm/src --skip-private --max-usages 1 --format json | jq
 [
   {
     "method": {
-      "name": "output_default_config",
-      "filename": "/home/samuel/Documentos/med-seg-tfm/src/cli/cli_utils.py",
-      "line_number": 173
+      "name": "visualize",
+      "filename": "/home/samuel/Documentos/med-seg-tfm/src/steps/visualization/visualize.py",
+      "line_number": 8
     },
     "usages": [
-      "/home/samuel/Documentos/med-seg-tfm/src/cli/cli_utils.py:173:5:def output_default_config(to_stdout: bool, filename: str | None) -> None:"
+      {
+        "location": "/home/samuel/Documentos/med-seg-tfm/src/steps/visualization/visualize.py:8:5",
+        "call_type": "definition",
+        "context": "def visualize(config: VisualizeConfig) -> None:"
+      }
     ],
-    "usage_count": 1
-  },
-  {
-    "method": {
-      "name": "normalize_to_uint8",
-      "filename": "/home/samuel/Documentos/med-seg-tfm/src/dashboard.py",
-      "line_number": 63
+    "usages_by_type": {
+      "definition": 1
     },
-    "usages": [
-      "/home/samuel/Documentos/med-seg-tfm/src/dashboard.py:63:5:def normalize_to_uint8(slice2d: np.ndarray) -> np.ndarray:"
-    ],
-    "usage_count": 1
+    "total_usages": 1
+   }
   }
 ]
 ```
