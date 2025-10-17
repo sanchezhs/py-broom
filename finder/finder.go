@@ -14,6 +14,23 @@ import (
 	"sync"
 )
 
+type CallType string
+
+const (
+	CallTypeInstance   CallType = "instance"   // self.method()
+	CallTypeClass      CallType = "class"      // cls.method()
+	CallTypeStatic     CallType = "static"     // ClassName.method()
+	CallTypeFunction   CallType = "function"   // method() - standalone or imported
+	CallTypeDefinition CallType = "definition" // def method():
+	CallTypeDecorator  CallType = "decorator"  // @decorator
+)
+
+type Usage struct {
+	Location string   `json:"location"`
+	CallType CallType `json:"call_type"`
+	Context  string   `json:"context"` // The actual line of code
+}
+
 type Method struct {
 	Name     string `json:"name"`
 	Filename string `json:"filename"`
@@ -27,9 +44,10 @@ type File struct {
 }
 
 type MethodUsage struct {
-	Method     Method   `json:"method"`
-	Usages     []string `json:"usages"`
-	UsageCount int      `json:"usage_count"`
+	Method       Method           `json:"method"`
+	Usages       []Usage          `json:"usages"`
+	UsagesByType map[CallType]int `json:"usages_by_type"`
+	TotalUsages  int              `json:"total_usages"`
 }
 
 type AnalysisResult struct {
@@ -45,6 +63,11 @@ type FileFilter struct {
 	SkipImports     bool
 	SkipTests       bool
 	SkipDefinitions bool
+}
+
+type CallPattern struct {
+	Type    CallType
+	Pattern *regexp.Regexp
 }
 
 func isPythonFile(filename string) bool {
@@ -81,7 +104,78 @@ func ReadDir(rootDir string) ([]File, error) {
 	return pythonFiles, err
 }
 
-func searchMethodUsages(methodName string, rootDir string, skipTests bool) ([]string, error) {
+func buildCallPatterns(methodName string) []CallPattern {
+	escaped := regexp.QuoteMeta(methodName)
+
+	return []CallPattern{
+		// Definition: def method_name(
+		{
+			Type:    CallTypeDefinition,
+			Pattern: regexp.MustCompile(`^\s*def\s+` + escaped + `\s*\(`),
+		},
+		// Decorator: @method_name or @something.method_name
+		{
+			Type:    CallTypeDecorator,
+			Pattern: regexp.MustCompile(`^\s*@(\w+\.)*` + escaped + `\s*$`),
+		},
+		// Instance call: self.method_name(
+		{
+			Type:    CallTypeInstance,
+			Pattern: regexp.MustCompile(`\bself\.` + escaped + `\s*\(`),
+		},
+		// Class call: cls.method_name(
+		{
+			Type:    CallTypeClass,
+			Pattern: regexp.MustCompile(`\bcls\.` + escaped + `\s*\(`),
+		},
+		// Static/Class name call: ClassName.method_name( or obj.method_name(
+		// This pattern matches any identifier followed by .method_name(
+		{
+			Type:    CallTypeStatic,
+			Pattern: regexp.MustCompile(`\b[A-Z][a-zA-Z0-9_]*\.` + escaped + `\s*\(`),
+		},
+		// Function call: method_name( (not preceded by a dot)
+		// Negative lookbehind would be ideal but Go doesn't support it
+		// So we'll check this separately in classifyUsage
+		{
+			Type:    CallTypeFunction,
+			Pattern: regexp.MustCompile(`(?:^|[^\w.])` + escaped + `\s*\(`),
+		},
+	}
+}
+
+func classifyUsage(line string, methodName string) (CallType, bool) {
+	trimmed := strings.TrimSpace(line)
+
+	if strings.HasPrefix(trimmed, "#") {
+		return "", false
+	}
+
+	if idx := strings.Index(line, "#"); idx != -1 {
+		codePart := line[:idx]
+		if !strings.Contains(codePart, methodName) {
+			return "", false
+		}
+		line = codePart
+	}
+
+	patterns := buildCallPatterns(methodName)
+
+	for _, pattern := range patterns {
+		if pattern.Pattern.MatchString(line) {
+			if pattern.Type == CallTypeFunction {
+				if strings.Contains(line, "."+methodName) {
+					continue
+				}
+			}
+			return pattern.Type, true
+		}
+	}
+
+	return "", false
+}
+
+func searchMethodUsages(methodName string, searchDir string, skipTests bool) ([]string, error) {
 	globs := []string{"*.py"}
 	if skipTests {
 		globs = append(globs, "!test_*.py", "!*_test.py")
@@ -93,7 +187,7 @@ func searchMethodUsages(methodName string, rootDir string, skipTests bool) ([]st
 	}
 
 	searchPattern := fmt.Sprintf(`\b%s\s*\(`, regexp.QuoteMeta(methodName))
-	args = append(args, searchPattern, rootDir)
+	args = append(args, searchPattern, searchDir)
 
 	cmd := exec.Command("rg", args...)
 	out, err := cmd.Output()
@@ -113,35 +207,44 @@ func isImportLine(line string) bool {
 	return strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "from ")
 }
 
-func FilterUsages(usages []string, skipImports bool, skipDefinitions bool) []string {
-	if !skipImports && !skipDefinitions {
-		return usages
-	}
+func ParseUsages(rawUsages []string, methodName string, filters FileFilter, definedFile string) []Usage {
+	var usages []Usage
 
-	var filtered []string
-	defRegex := regexp.MustCompile(`def\s+\w+\s*\(`)
-
-	for _, usage := range usages {
-		parts := strings.SplitN(usage, ":", 4)
+	for _, rawUsage := range rawUsages {
+		parts := strings.SplitN(rawUsage, ":", 4)
 		if len(parts) < 4 {
-			filtered = append(filtered, usage)
 			continue
 		}
 
+		filepath := parts[0]
+		lineNo := parts[1]
+		colNo := parts[2]
 		lineContent := parts[3]
 
-		if skipImports && isImportLine(lineContent) {
+		if filters.SkipImports && isImportLine(lineContent) {
 			continue
 		}
 
-		if skipDefinitions && defRegex.MatchString(lineContent) {
+		callType, valid := classifyUsage(lineContent, methodName)
+		if !valid {
 			continue
 		}
 
-		filtered = append(filtered, usage)
+		if filters.SkipDefinitions && callType == CallTypeDefinition {
+			if filepath != definedFile {
+				continue
+			}
+		}
+
+		location := fmt.Sprintf("%s:%s:%s", filepath, lineNo, colNo)
+		usages = append(usages, Usage{
+			Location: location,
+			CallType: callType,
+			Context:  strings.TrimSpace(lineContent),
+		})
 	}
 
-	return filtered
+	return usages
 }
 
 func isPrivateMethod(methodName string) bool {
@@ -201,7 +304,7 @@ func FindMethods(files []File, filters MethodFilter) []Method {
 	return allMethods
 }
 
-func AnalyzeMethodUsages(methods []Method, rootDir string, filters FileFilter) []MethodUsage {
+func AnalyzeMethodUsages(methods []Method, searchDir string, filters FileFilter) []MethodUsage {
 	resultsChan := make(chan MethodUsage, len(methods))
 	var wg sync.WaitGroup
 
@@ -210,23 +313,31 @@ func AnalyzeMethodUsages(methods []Method, rootDir string, filters FileFilter) [
 		go func(m Method) {
 			defer wg.Done()
 
-			usages, err := searchMethodUsages(m.Name, rootDir, filters.SkipTests)
+			rawUsages, err := searchMethodUsages(m.Name, searchDir, filters.SkipTests)
 			if err != nil {
 				log.Printf("Error searching for method %s: %v", m.Name, err)
 				resultsChan <- MethodUsage{
-					Method:     m,
-					Usages:     []string{},
-					UsageCount: 0,
+					Method:       m,
+					Usages:       []Usage{},
+					UsagesByType: make(map[CallType]int),
+					TotalUsages:  0,
 				}
 				return
 			}
 
-			filteredUsages := FilterUsages(usages, filters.SkipImports, filters.SkipDefinitions)
+			usages := ParseUsages(rawUsages, m.Name, filters, m.Filename)
+
+			// Count usages by type
+			usagesByType := make(map[CallType]int)
+			for _, usage := range usages {
+				usagesByType[usage.CallType]++
+			}
 
 			resultsChan <- MethodUsage{
-				Method:     m,
-				Usages:     filteredUsages,
-				UsageCount: len(filteredUsages),
+				Method:       m,
+				Usages:       usages,
+				UsagesByType: usagesByType,
+				TotalUsages:  len(usages),
 			}
 		}(method)
 	}
@@ -248,11 +359,11 @@ func FilterByUsageCount(results []MethodUsage, minUsages, maxUsages int) []Metho
 	var filtered []MethodUsage
 
 	for _, result := range results {
-		if minUsages >= 0 && result.UsageCount < minUsages {
+		if minUsages >= 0 && result.TotalUsages < minUsages {
 			continue
 		}
 
-		if maxUsages >= 0 && result.UsageCount > maxUsages {
+		if maxUsages >= 0 && result.TotalUsages > maxUsages {
 			continue
 		}
 
@@ -262,39 +373,67 @@ func FilterByUsageCount(results []MethodUsage, minUsages, maxUsages int) []Metho
 	return filtered
 }
 
-func SortResults(results []MethodUsage, sortBy string) {
-	switch sortBy {
-	case "name":
-		sort.Slice(results, func(i, j int) bool {
+func SortResults(results []MethodUsage, sortBy string, asc bool) {
+	sortBy = strings.ToLower(sortBy)
+
+	less := func(i, j int) bool {
+		switch sortBy {
+		case "name":
 			return results[i].Method.Name < results[j].Method.Name
-		})
-	case "file":
-		sort.Slice(results, func(i, j int) bool {
+
+		case "file":
 			if results[i].Method.Filename == results[j].Method.Filename {
 				return results[i].Method.LineNo < results[j].Method.LineNo
 			}
 			return results[i].Method.Filename < results[j].Method.Filename
-		})
-	case "usages":
-		sort.Slice(results, func(i, j int) bool {
-			if results[i].UsageCount == results[j].UsageCount {
+
+		case "usages":
+			if results[i].TotalUsages == results[j].TotalUsages {
 				return results[i].Method.Name < results[j].Method.Name
 			}
-			return results[i].UsageCount < results[j].UsageCount
-		})
-	case "usages-desc":
-		sort.Slice(results, func(i, j int) bool {
-			if results[i].UsageCount == results[j].UsageCount {
-				return results[i].Method.Name < results[j].Method.Name
+			return results[i].TotalUsages < results[j].TotalUsages
+
+		default:
+			if results[i].Method.Filename == results[j].Method.Filename {
+				return results[i].Method.LineNo < results[j].Method.LineNo
 			}
-			return results[i].UsageCount > results[j].UsageCount
-		})
+			return results[i].Method.Filename < results[j].Method.Filename
+		}
+	}
+
+	if asc {
+		sort.Slice(results, less)
+	} else {
+		sort.Slice(results, func(i, j int) bool { return !less(i, j) })
+	}
+}
+
+func GetCallTypeOrder() []CallType {
+	return []CallType{
+		CallTypeDefinition,
+		CallTypeInstance,
+		CallTypeClass,
+		CallTypeStatic,
+		CallTypeFunction,
+		CallTypeDecorator,
+	}
+}
+
+func GetCallTypeLabel(ct CallType) string {
+	switch ct {
+	case CallTypeDefinition:
+		return "Definition"
+	case CallTypeInstance:
+		return "Instance calls"
+	case CallTypeClass:
+		return "Class calls"
+	case CallTypeStatic:
+		return "Static calls"
+	case CallTypeFunction:
+		return "Function calls"
+	case CallTypeDecorator:
+		return "Decorator usage"
 	default:
-		sort.Slice(results, func(i, j int) bool {
-			if results[i].Method.Filename == results[j].Method.Filename {
-				return results[i].Method.LineNo < results[j].Method.LineNo
-			}
-			return results[i].Method.Filename < results[j].Method.Filename
-		})
+		return string(ct)
 	}
 }

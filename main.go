@@ -34,6 +34,7 @@ func newRootCmd() *cobra.Command {
 		minUsages       int
 		maxUsages       int
 		sortBy          string
+		asc             bool
 	)
 
 	rootCmd := &cobra.Command{
@@ -42,6 +43,9 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage: true,         // Do not print usage on handled errors
 		Args:         cobra.NoArgs, // No unexpected positional args allowed
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if asc && !cmd.Flags().Changed("sort-by") {
+				return fmt.Errorf("--asc flag can only be used together with --sort-by")
+			}
 			// Verbose banner
 			if verbose {
 				log.Printf("Searching for Python files in: %s\n", dir)
@@ -105,9 +109,14 @@ func newRootCmd() *cobra.Command {
 			}
 
 			// Sort
-			finder.SortResults(results, sortBy)
+			finder.SortResults(results, sortBy, asc)
 			if verbose {
 				log.Printf("Results sorted by: %s\n", sortBy)
+			}
+
+			if format == "--help" {
+				_ = cmd.Usage()
+				return nil
 			}
 
 			// Console printer
@@ -157,7 +166,8 @@ func newRootCmd() *cobra.Command {
 	rootCmd.Flags().BoolVar(&noColor, "no-color", false, "Disable colored output")
 	rootCmd.Flags().IntVar(&minUsages, "min-usages", -1, "Filter methods with at least N usages (-1 = no filter)")
 	rootCmd.Flags().IntVar(&maxUsages, "max-usages", -1, "Filter methods with at most N usages (-1 = no filter)")
-	rootCmd.Flags().StringVar(&sortBy, "sort", "file", "Sort results by: name, file, usages, usages-desc")
+	rootCmd.Flags().StringVar(&sortBy, "sort-by", "file", "Sort results by: name, file, usages")
+	rootCmd.Flags().BoolVar(&asc, "asc", false, "Sort ascending (only valid when --sort-by is used)")
 
 	return rootCmd
 }

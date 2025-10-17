@@ -16,9 +16,9 @@ type Printer interface {
 	Print(w io.Writer, methodUsage []finder.MethodUsage) error
 }
 
-//================================================================================
+// ================================================================================
 // Console
-//================================================================================
+// ================================================================================
 
 type ConsolePrinter struct {
 	NoColor bool
@@ -26,37 +26,193 @@ type ConsolePrinter struct {
 
 func (p ConsolePrinter) Print(w io.Writer, results []finder.MethodUsage) error {
 	for _, result := range results {
-		fmt.Fprintf(w, "%s %s\n",
-			colors.Colorize("Method:", colors.ColorYellow+colors.ColorBold, p.NoColor),
-			colors.Colorize(result.Method.Name, colors.ColorGreen+colors.ColorBold, p.NoColor))
-
-		fmt.Fprintf(w, "%s %s:%d\n",
-			colors.Colorize("Defined in:", colors.ColorYellow, p.NoColor),
-			result.Method.Filename,
-			result.Method.LineNo)
-
-		usageColor := colors.ColorGreen
-		if result.UsageCount == 0 {
-			usageColor = colors.ColorRed
+		if err := p.printMethodUsage(w, result); err != nil {
+			return err
 		}
-		fmt.Fprintf(w, "%s %s\n",
-			colors.Colorize("Usages found:", colors.ColorYellow, p.NoColor),
-			colors.Colorize(fmt.Sprintf("%d", result.UsageCount), usageColor+colors.ColorBold, p.NoColor))
-
-		if len(result.Usages) > 0 {
-			fmt.Fprintln(w, colors.Colorize("Locations:", colors.ColorYellow, p.NoColor))
-			for _, u := range result.Usages {
-				fmt.Fprintf(w, "  %s %s\n",
-					colors.Colorize("-", colors.ColorBlue, p.NoColor),
-					u)
-			}
-		} else {
-			fmt.Fprintf(w, "  %s\n", colors.Colorize("(No usages found)", colors.ColorRed, p.NoColor))
-		}
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, colors.Colorize(strings.Repeat("-", 80), colors.ColorPurple, p.NoColor))
-		fmt.Fprintln(w)
 	}
+	return nil
+}
+
+func (p ConsolePrinter) printMethodUsage(w io.Writer, mu finder.MethodUsage) error {
+	methodName := colors.Colorize(mu.Method.Name, colors.ColorBold+colors.ColorCyan, p.NoColor)
+	fmt.Fprintf(w, "Method: %s\n", methodName)
+
+	location := fmt.Sprintf("%s:%d", mu.Method.Filename, mu.Method.LineNo)
+	fmt.Fprintf(w, "Defined in: %s\n", colors.Colorize(location, colors.ColorBlue, p.NoColor))
+
+	usageColor := p.getUsageCountColor(mu.TotalUsages)
+	totalUsages := colors.Colorize(fmt.Sprintf("%d", mu.TotalUsages), usageColor, p.NoColor)
+	fmt.Fprintf(w, "Total usages: %s\n", totalUsages)
+
+	if mu.TotalUsages == 0 {
+		noUsages := colors.Colorize("  (No usages found)", colors.ColorYellow, p.NoColor)
+		fmt.Fprintln(w, noUsages)
+		fmt.Fprintln(w, colors.Colorize(strings.Repeat("-", 80), colors.ColorReset, p.NoColor))
+		return nil
+	}
+
+	if len(mu.UsagesByType) > 0 {
+		fmt.Fprintln(w, colors.Colorize("Usage breakdown:", colors.ColorBold, p.NoColor))
+
+		for _, callType := range finder.GetCallTypeOrder() {
+			if count, exists := mu.UsagesByType[callType]; exists && count > 0 {
+				label := finder.GetCallTypeLabel(callType)
+				typeColor := p.getCallTypeColor(callType)
+				coloredLabel := colors.Colorize(label, typeColor, p.NoColor)
+				fmt.Fprintf(w, "  - %s: %s\n", coloredLabel,
+					colors.Colorize(fmt.Sprintf("%d", count), typeColor, p.NoColor))
+			}
+		}
+	}
+
+	usagesByType := make(map[finder.CallType][]finder.Usage)
+	for _, usage := range mu.Usages {
+		usagesByType[usage.CallType] = append(usagesByType[usage.CallType], usage)
+	}
+
+	for _, callType := range finder.GetCallTypeOrder() {
+		usages, exists := usagesByType[callType]
+		if !exists || len(usages) == 0 {
+			continue
+		}
+
+		typeColor := p.getCallTypeColor(callType)
+		header := colors.Colorize(finder.GetCallTypeLabel(callType)+":", colors.ColorBold+typeColor, p.NoColor)
+		fmt.Fprintf(w, "\n%s\n", header)
+
+		for _, usage := range usages {
+			fmt.Fprintf(w, "  - %s\n", colors.Colorize(usage.Location, colors.ColorWhite, p.NoColor))
+			fmt.Fprintf(w, "    %s\n", usage.Context)
+		}
+	}
+
+	// Separator
+	separator := colors.Colorize(strings.Repeat("-", 80), colors.ColorReset, p.NoColor)
+	fmt.Fprintln(w, separator)
+
+	return nil
+}
+
+func (p ConsolePrinter) getUsageCountColor(count int) string {
+	switch {
+	case count == 0:
+		return colors.ColorYellow
+	case count <= 2:
+		return colors.ColorRed
+	case count <= 5:
+		return colors.ColorYellow
+	default:
+		return colors.ColorGreen
+	}
+}
+
+func (p ConsolePrinter) getCallTypeColor(ct finder.CallType) string {
+	switch ct {
+	case finder.CallTypeDefinition:
+		return colors.ColorPurple
+	case finder.CallTypeInstance:
+		return colors.ColorGreen
+	case finder.CallTypeClass:
+		return colors.ColorCyan
+	case finder.CallTypeStatic:
+		return colors.ColorBlue
+	case finder.CallTypeFunction:
+		return colors.ColorYellow
+	case finder.CallTypeDecorator:
+		return colors.ColorPurple
+	default:
+		return colors.ColorWhite
+	}
+}
+
+func (p ConsolePrinter) PrintSummary(w io.Writer, results []finder.MethodUsage) error {
+	totalMethods := len(results)
+
+	var unused, lowUsage, mediumUsage, highUsage int
+	totalInstanceCalls := 0
+	totalClassCalls := 0
+	totalStaticCalls := 0
+	totalFunctionCalls := 0
+	totalDecoratorCalls := 0
+
+	for _, result := range results {
+		switch {
+		case result.TotalUsages == 0:
+			unused++
+		case result.TotalUsages <= 2:
+			lowUsage++
+		case result.TotalUsages <= 5:
+			mediumUsage++
+		default:
+			highUsage++
+		}
+
+		totalInstanceCalls += result.UsagesByType[finder.CallTypeInstance]
+		totalClassCalls += result.UsagesByType[finder.CallTypeClass]
+		totalStaticCalls += result.UsagesByType[finder.CallTypeStatic]
+		totalFunctionCalls += result.UsagesByType[finder.CallTypeFunction]
+		totalDecoratorCalls += result.UsagesByType[finder.CallTypeDecorator]
+	}
+
+	separator := colors.Colorize(strings.Repeat("=", 80), colors.ColorBold, p.NoColor)
+	title := colors.Colorize("SUMMARY", colors.ColorBold+colors.ColorCyan, p.NoColor)
+
+	fmt.Fprintln(w, "\n"+separator)
+	fmt.Fprintln(w, title)
+	fmt.Fprintln(w, separator)
+
+	totalMethodsStr := colors.Colorize(fmt.Sprintf("%d", totalMethods), colors.ColorBold+colors.ColorGreen, p.NoColor)
+	fmt.Fprintf(w, "Total methods analyzed: %s\n\n", totalMethodsStr)
+
+	fmt.Fprintln(w, colors.Colorize("Methods by usage count:", colors.ColorBold, p.NoColor))
+
+	// Unused - red
+	unusedPct := float64(unused) / float64(totalMethods) * 100
+	fmt.Fprintf(w, "  - %s: %s (%s)\n",
+		colors.Colorize("Unused (0 usages)", colors.ColorYellow, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%d", unused), colors.ColorYellow, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%.1f%%", unusedPct), colors.ColorYellow, p.NoColor))
+
+	// Low usage - yellow
+	lowPct := float64(lowUsage) / float64(totalMethods) * 100
+	fmt.Fprintf(w, "  - %s: %s (%s)\n",
+		colors.Colorize("Low usage (1-2 usages)", colors.ColorRed, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%d", lowUsage), colors.ColorRed, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%.1f%%", lowPct), colors.ColorRed, p.NoColor))
+
+	// Medium usage - cyan
+	medPct := float64(mediumUsage) / float64(totalMethods) * 100
+	fmt.Fprintf(w, "  - %s: %s (%s)\n",
+		colors.Colorize("Medium (3-5 usages)", colors.ColorYellow, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%d", mediumUsage), colors.ColorYellow, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%.1f%%", medPct), colors.ColorYellow, p.NoColor))
+
+	// High usage - green
+	highPct := float64(highUsage) / float64(totalMethods) * 100
+	fmt.Fprintf(w, "  - %s: %s (%s)\n\n",
+		colors.Colorize("High usage (6+ usages)", colors.ColorGreen, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%d", highUsage), colors.ColorGreen, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%.1f%%", highPct), colors.ColorGreen, p.NoColor))
+
+	fmt.Fprintln(w, colors.Colorize("Call type distribution:", colors.ColorBold, p.NoColor))
+	fmt.Fprintf(w, "  - %s: %s\n",
+		colors.Colorize("Instance calls", colors.ColorGreen, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%d", totalInstanceCalls), colors.ColorGreen, p.NoColor))
+	fmt.Fprintf(w, "  - %s: %s\n",
+		colors.Colorize("Class calls", colors.ColorCyan, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%d", totalClassCalls), colors.ColorCyan, p.NoColor))
+	fmt.Fprintf(w, "  - %s: %s\n",
+		colors.Colorize("Static calls", colors.ColorBlue, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%d", totalStaticCalls), colors.ColorBlue, p.NoColor))
+	fmt.Fprintf(w, "  - %s: %s\n",
+		colors.Colorize("Function calls", colors.ColorYellow, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%d", totalFunctionCalls), colors.ColorYellow, p.NoColor))
+	fmt.Fprintf(w, "  - %s: %s\n",
+		colors.Colorize("Decorator usage", colors.ColorPurple, p.NoColor),
+		colors.Colorize(fmt.Sprintf("%d", totalDecoratorCalls), colors.ColorPurple, p.NoColor))
+
+	fmt.Fprintln(w, separator)
+
 	return nil
 }
 
@@ -86,14 +242,32 @@ type VimPrinter struct{}
 func (VimPrinter) Print(w io.Writer, results []finder.MethodUsage) error {
 	for _, r := range results {
 		for _, u := range r.Usages {
-			// u is expected to be: "<file>:<line>:<col>:<context>"
-			// We just pass it through as-is.
-			if _, err := fmt.Fprintln(w, u); err != nil {
+			loc := strings.TrimSpace(u.Location) // expected "path:line:col"
+			ctx := sanitizeContext(u.Context)
+
+			if ctx == "" {
+				if u.CallType != "" {
+					ctx = fmt.Sprintf("%s [%s]", r.Method.Name, string(u.CallType))
+				} else {
+					ctx = r.Method.Name
+				}
+			}
+
+			if _, err := fmt.Fprintf(w, "%s:%s\n", loc, ctx); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func sanitizeContext(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\t", " ")
+	s = strings.TrimLeft(s, " ")
+	s = strings.Join(strings.Fields(s), " ")
+	return s
 }
 
 //================================================================================
@@ -141,7 +315,7 @@ func (GraphvizPrinter) Print(w io.Writer, results []finder.MethodUsage) error {
 		nodes[callee] = struct{}{}
 
 		for _, u := range r.Usages {
-			useFile := extractPathFromUsage(u)
+			useFile := extractPathFromUsage(u.Context)
 			if useFile == "" {
 				continue
 			}
@@ -180,7 +354,7 @@ const (
 var OutputKinds = map[string]Kind{
 	"console":  KindConsole,
 	"json":     KindJSON,
-	"vim":      KindVimGrep,
+	"vimgrep":  KindVimGrep,
 	"graphviz": KindGraphviz,
 }
 
