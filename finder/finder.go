@@ -2,6 +2,7 @@
 package finder
 
 import (
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -41,8 +42,9 @@ type MethodFilter struct {
 }
 
 type FileFilter struct {
-	SkipImports bool
-	SkipTests   bool
+	SkipImports     bool
+	SkipTests       bool
+	SkipDefinitions bool
 }
 
 func isPythonFile(filename string) bool {
@@ -90,7 +92,8 @@ func searchMethodUsages(methodName string, rootDir string, skipTests bool) ([]st
 		args = append(args, "--glob", g)
 	}
 
-	args = append(args, methodName, rootDir)
+	searchPattern := fmt.Sprintf(`\b%s\s*\(`, regexp.QuoteMeta(methodName))
+	args = append(args, searchPattern, rootDir)
 
 	cmd := exec.Command("rg", args...)
 	out, err := cmd.Output()
@@ -218,7 +221,7 @@ func AnalyzeMethodUsages(methods []Method, rootDir string, filters FileFilter) [
 				return
 			}
 
-			filteredUsages := FilterUsages(usages, filters.SkipImports, false)
+			filteredUsages := FilterUsages(usages, filters.SkipImports, filters.SkipDefinitions)
 
 			resultsChan <- MethodUsage{
 				Method:     m,

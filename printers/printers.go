@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/sanchezhs/py-broom/colors"
@@ -96,21 +97,91 @@ func (VimPrinter) Print(w io.Writer, results []finder.MethodUsage) error {
 }
 
 //================================================================================
+// Graphviz
+//================================================================================
+
+type GraphvizPrinter struct {
+	opts Options
+}
+
+func NewGraphvizPrinter(opts Options) *GraphvizPrinter {
+	return &GraphvizPrinter{opts: opts}
+}
+
+func extractPathFromUsage(s string) string {
+	parts := strings.Split(s, ":")
+	if len(parts) >= 4 {
+		return strings.Join(parts[:len(parts)-3], ":")
+	}
+	if len(parts) == 3 {
+		return parts[0]
+	}
+	return s
+}
+
+func (GraphvizPrinter) Print(w io.Writer, results []finder.MethodUsage) error {
+	fmt.Fprintln(w, "digraph G {")
+	fmt.Fprintln(w, `  rankdir=LR;`)
+	fmt.Fprintln(w, `  node [shape=box, fontsize=10];`)
+
+	nodes := make(map[string]struct{})
+	edges := make(map[string]struct{})
+
+	normalizeNode := func(filePath, funcName string) string {
+		base := filepath.Base(filePath)
+		ext := filepath.Ext(base)
+		if len(ext) > 0 {
+			base = strings.TrimSuffix(base, ext)
+		}
+		return base + ":" + funcName
+	}
+
+	for _, r := range results {
+		callee := normalizeNode(r.Method.Filename, r.Method.Name)
+		nodes[callee] = struct{}{}
+
+		for _, u := range r.Usages {
+			useFile := extractPathFromUsage(u)
+			if useFile == "" {
+				continue
+			}
+			caller := normalizeNode(useFile, "<module>")
+			nodes[caller] = struct{}{}
+
+			edgeKey := `"` + caller + `"->"` + callee + `"`
+			edges[edgeKey] = struct{}{}
+		}
+	}
+
+	for n := range nodes {
+		fmt.Fprintf(w, "  %q;\n", n)
+	}
+	for e := range edges {
+		fmt.Fprintf(w, "  %s;\n", e)
+	}
+
+	fmt.Fprintln(w, "}")
+	return nil
+}
+
+//================================================================================
 // Factory
 //================================================================================
 
 type Kind string
 
 const (
-	KindConsole Kind = "console"
-	KindJSON    Kind = "json"
-	KindVimGrep Kind = "vimgrep"
+	KindConsole  Kind = "console"
+	KindJSON     Kind = "json"
+	KindVimGrep  Kind = "vimgrep"
+	KindGraphviz Kind = "graphviz"
 )
 
 var OutputKinds = map[string]Kind{
-	"console": KindConsole,
-	"json":    KindJSON,
-	"vim":     KindVimGrep,
+	"console":  KindConsole,
+	"json":     KindJSON,
+	"vim":      KindVimGrep,
+	"graphviz": KindGraphviz,
 }
 
 type Options struct {
@@ -132,6 +203,8 @@ func New(kind Kind, opts Options) Printer {
 		return JSONPrinter{Indent: opts.Indent}
 	case KindVimGrep:
 		return VimPrinter{}
+	case KindGraphviz:
+		return GraphvizPrinter{}
 	case KindConsole:
 		fallthrough
 	default:
